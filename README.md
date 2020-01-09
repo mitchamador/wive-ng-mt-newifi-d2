@@ -1,7 +1,7 @@
 # wive-ng-mt-newifi-d2
-wive-ng-mt for newifi-d2 router
+[wive-ng-mt](https://sourceforge.net/projects/wive-ng/) for newifi-d2 router
 
-# how-to:
+# how-to
 
 **backup original eeprom using breed**
 
@@ -37,4 +37,6 @@ defaults:
 - web/ssh login: Admin
 - web/ssh password: Admin
 
-do not forget to restore original eeprom before flashing other firmware
+note:
+- use ubuntu 16.04 for compiling firmware;
+- do not forget to restore original eeprom before flashing other firmware;
