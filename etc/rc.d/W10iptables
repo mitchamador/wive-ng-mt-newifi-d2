@@ -1,0 +1,785 @@
+#!/bin/sh
+
+# prevent double startiptables configure in one time
+while [ -e /tmp/iptables_runing ]; do
+    # Sleep until file does exists/is created
+    usleep 500000
+done
+echo $$ > /tmp/iptables_runing
+
+#include global config
+. /etc/scripts/global.sh
+
+LOG="logger -t iptables"
+
+iptaccounting() {
+	# ipt_account must be first rules in FORWARD
+	if [ "$ipt_account" = "1" ]; then
+	    $LOG "Start ipt_accounting for $lan_ip_acc/$lan_ip_prf"
+	    iptables -N ipaccount
+	    iptables -A FORWARD -j ipaccount
+	    iptables -A ipaccount -m account --aname mynetwork --aaddr "$lan_ip_acc"/"$lan_ip_prf" --ashort
+	    echo "show=src" > /proc/net/ipt_account/mynetwork
+	    echo "reset-on-read=no" > /proc/net/ipt_account/mynetwork
+	fi
+}
+
+servicelimit() {
+	$LOG "Service limit set"
+        # add limit connection rules for local services
+	iptables -N servicelimit > /dev/null 2>&1
+        iptables -F servicelimit > /dev/null 2>&1
+        iptables -A INPUT -j servicelimit > /dev/null 2>&1
+
+	# user defined input polices for local services
+	if [ "$IPPortFilterInputEnable" = "1" ] && [ -e /etc/macipinputfilter ]; then
+		$LOG "Set macipport input filter rules"
+		/etc/macipinputfilter
+	fi
+
+	# INPUT needed by unpxy and igmpproxy
+	if [ "$igmpEnabled" != "0" ] || [ "$UDPXYMode" != "0" ] || [ "$xupnpd" = "1" ]; then
+	    $LOG "Set igmp input rules"
+	    iptables -A servicelimit -p igmp -i $lan_if -j ACCEPT
+	    iptables -A servicelimit -d $mcast_net -i $wan_if -j ACCEPT
+	    iptables -A servicelimit -s $mcast_net -i $wan_if -j ACCEPT
+	    if [ "$tv_port" = "1" ] && [ "$tv_portVLAN" != "" ] && [ "$tv_port_mcast" = "1" ]; then
+		    iptables -A servicelimit -d $mcast_net -i $vlantvif -j ACCEPT
+		    iptables -A servicelimit -s $mcast_net -i $vlantvif -j ACCEPT
+	    fi
+	    if [ "$sip_port" = "1" ] && [ "$sip_portVLAN" != "" ] && [ "$sip_port_mcast" = "1" ]; then
+		    iptables -A servicelimit -d $mcast_net -i $vlansipif -j ACCEPT
+		    iptables -A servicelimit -s $mcast_net -i $vlansipif -j ACCEPT
+	    fi
+	fi
+	if [ "$dhcpEnabled" = "1" ]; then
+	    $LOG "DHCP server allow"
+	    iptables -A servicelimit -i $lan_if -p udp --dport 67 -j ACCEPT
+	fi
+	if [ "$iaappneed" = "1" ]; then
+	    $LOG "802.11f daemon allow to connect"
+	    iptables -A servicelimit -i $lan_if -p udp --dport 3517 -j ACCEPT
+	    iptables -A servicelimit -i $lan_if -p tcp --dport 3517 -j ACCEPT
+	fi
+	if [ "$dnsPEnabled" = "1" ]; then
+	    $LOG "Dnsproxy allow to connect"
+	    iptables -A servicelimit -i $lan_if -p udp --dport 53 -j ACCEPT
+	    iptables -A servicelimit -i $lan_if $STATE_NEW -p tcp --dport 53 -j ACCEPT
+	fi
+	if [ "$radius_srv_enabled" != "0" ]; then
+	    $LOG "Radius server allow to connect"
+	    if [ "$radius_srv_enabled" = "1" ]; then
+    		iptables -A servicelimit -i $lan_if $STATE_NEW -p tcp --dport 1812:1813 -j ACCEPT
+    		iptables -A servicelimit -i $lan_if $STATE_NEW -p udp --dport 1812:1813 -j ACCEPT
+	    elif [ "$radius_srv_enabled" = "2" ]; then
+    		iptables -A servicelimit $STATE_NEW -p tcp --dport 1812:1813 -j ACCEPT
+    		iptables -A servicelimit $STATE_NEW -p udp --dport 1812:1813 -j ACCEPT
+	    fi
+	fi
+	if [ "$RIPEnable" = "1" ]; then
+	    $LOG "Quagga allow to connections (from all interfaces)."
+	    iptables -A servicelimit $STATE_NEW -p tcp --dport 2601:2602 -j ACCEPT
+	fi
+	if [ "$l2tp_srv_enabled" = "1" ]; then
+	    $LOG "Add vpnfilter rules for L2TP server"
+	    # if add support ipsec need udp 500 - IKE and 4500 - ipsec-NAT ports add
+	    iptables -A servicelimit -p udp --dport 1701 -j ACCEPT
+	    iptables -A servicelimit -p udp --sport 1701 -j ACCEPT
+	fi
+	if [ "$VPN_CONNECT" = "on" ] && [ "$vpnType" = "1" ]; then
+	    $LOG "Add vpnfilter rules for PPTP"
+	    iptables -A servicelimit -p gre -j ACCEPT
+	    iptables -A servicelimit -p tcp --sport 1723 -j ACCEPT
+	fi
+	if [ "$LOCAL_PRT" != "" ]; then
+	    $LOG "allow local port range $LOCAL_PRT from LAN, need for some local service"
+	    iptables -A servicelimit -i $lan_if -p udp --dport "$LOCAL_PRT" -j ACCEPT
+	fi
+	if [ "$upnpEnabled" = "1" ] && [ "$ROUTE_MODE" = "on" ]; then
+	    $LOG "UPNP allow to connect"
+	    iptables -A servicelimit -i $lan_if $STATE_NEW -p tcp --dport 8666 -j ACCEPT
+	    iptables -A servicelimit -i $lan_if -p udp --dport 1900 -j ACCEPT
+	    iptables -A servicelimit -i $lan_if -p udp --dport 5350:5351 -j ACCEPT
+	fi
+	if [ "$xupnpd" = "1" ]; then
+	    $LOG "Xupnpd allow to connect"
+	    iptables -A servicelimit -i $lan_if $STATE_NEW -p tcp --dport 4044 -j ACCEPT
+	    iptables -A servicelimit -i $lan_if -p udp --dport 1900 -j ACCEPT
+	fi
+	if [ "$UDPXYMode" != "0" ]; then
+	    $LOG "Udpxy allow to connect"
+	    if [ "$UDPXYMode" = "1" ]; then
+    		iptables -A servicelimit -i $lan_if $STATE_NEW -p tcp --dport $UDPXYPort -j ACCEPT
+	    elif [ "$UDPXYMode" = "2" ]; then
+    		iptables -A servicelimit $STATE_NEW -p tcp --dport $UDPXYPort -j ACCEPT
+	    fi
+	fi
+	if [ "$SmbEnabled" = "1" ]; then
+	    $LOG "Samba allow to connect"
+	    iptables -A servicelimit -i $lan_if -p udp --dport 137:138 -j ACCEPT
+	    iptables -A servicelimit -i $lan_if $STATE_NEW -p tcp -m multiport --dport 139,445 -j ACCEPT
+	    if [ "$WsddEnabled" = "1" ]; then
+		$LOG "Wsdd2 allow to connect"
+		iptables -A servicelimit -i $lan_if $STATE_NEW -p tcp -m multiport --dport 3702,5355 -j ACCEPT
+		iptables -A servicelimit -i $lan_if -p udp -m multiport --dport 3702,5355 -j ACCEPT
+	    fi
+	fi
+	if [ "$RemoteManagement" != "0" ]; then
+	    $LOG "Remote managment web limit"
+    	    iptables -A servicelimit -p tcp --dport $RemoteManagementPort $CONNLIMIT 16 -j REJECT
+	    iptables -A servicelimit -p tcp --dport $RemoteManagementPortHTTPS $CONNLIMIT 16 -j REJECT
+	    if [ "$RemoteManagement" = "1" ]; then
+    		iptables -A servicelimit -i $lan_if $STATE_NEW -p tcp --dport $RemoteManagementPort -j ACCEPT
+		iptables -A servicelimit -i $lan_if $STATE_NEW -p tcp --dport $RemoteManagementPortHTTPS -j ACCEPT
+	    elif [ "$RemoteManagement" = "2" ]; then
+    		iptables -A servicelimit $STATE_NEW -p tcp --dport $RemoteManagementPort -j ACCEPT
+		iptables -A servicelimit $STATE_NEW -p tcp --dport $RemoteManagementPortHTTPS -j ACCEPT
+	    fi
+	fi
+	if [ "$cwmpdEnabled" != "0" ] && [ "$cwmpd_httpd_port" != "" ]; then
+	    $LOG "CWMP limit to 4 callback connections from WAN."
+    	    iptables -A servicelimit $STATE_NEW -p tcp --dport $cwmpd_httpd_port $CONNLIMIT 4 -j REJECT
+	    # for auto or semi auto mode need limit rules for opt43 by dhcp, not allow for all
+	    if [ ! -e /etc/iptables.d/cwmpdfw ] && [ "$cwmpdEnabled" != "2" ]; then
+		iptables -A servicelimit ! -i $lan_if $STATE_NEW -p tcp --dport $cwmpd_httpd_port -j ACCEPT
+	    fi
+	fi
+	if [ "$RemoteSSH" != "0" ]; then
+	    $LOG "Remote managment ssh limit"
+    	    iptables -A servicelimit $STATE_NEW -p tcp --dport $RemoteSSHPort $CONNLIMIT 4 -j REJECT
+	    if [ "$RemoteSSH" = "1" ]; then
+    		iptables -A servicelimit -i $lan_if $STATE_NEW -p tcp --dport $RemoteSSHPort -j ACCEPT
+	    elif [ "$RemoteSSH" = "2" ]; then
+    		iptables -A servicelimit $STATE_NEW -p tcp --dport $RemoteSSHPort -j ACCEPT
+	    fi
+	fi
+	if [ "$RemoteTelnet" != "0" ]; then
+	    $LOG "Remote managment telnet limit"
+    	    iptables -A servicelimit $STATE_NEW -p tcp --dport 23 $CONNLIMIT 4 -j REJECT
+	    if [ "$RemoteTelnet" = "1" ]; then
+    		iptables -A servicelimit -i $lan_if $STATE_NEW -p tcp --dport 23 -j ACCEPT
+	    elif [ "$RemoteTelnet" = "2" ]; then
+    		iptables -A servicelimit $STATE_NEW -p tcp --dport 23 -j ACCEPT
+	    fi
+	fi
+	if [ "$RemoteFTP" != "0" ]; then
+	    $LOG "FTP allow to connect"
+	    if [ "$RemoteFTP" = "1" ]; then
+    		iptables -A servicelimit -i $lan_if $STATE_NEW -p tcp -m multiport --dport 20,$FtpPort -j ACCEPT
+	    elif [ "$RemoteFTP" = "2" ]; then
+    		iptables -A servicelimit $STATE_NEW -p tcp -m multiport --dport 20,$FtpPort -j ACCEPT
+	    fi
+	fi
+	if [ "$snmpd" = "1" ]; then
+	    $LOG "SNMP allow to connect from LAN"
+	    iptables -A servicelimit -i $lan_if -p udp --dport 161 -j ACCEPT
+	elif [ "$snmpd" = "2" ]; then
+	    $LOG "SNMP allow to connect from LAN&WAN"
+	    iptables -A servicelimit -p udp --dport 161 -j ACCEPT
+	fi
+	if [ "$PrinterSrvEnabled" = "1" ]; then
+	    $LOG "Print server allow to connect"
+	    iptables -A servicelimit -i $lan_if -p tcp --dport 9100 -j ACCEPT
+	fi
+	if [ "$TransmissionEnabled" = "1" ]; then
+	    $LOG "Transmission allow to connect"
+	    # RPC
+	    if [ "$TransAccess" = "1" ]; then
+		iptables -A servicelimit -i $lan_if $STATE_NEW -p tcp --dport $TransRPCPort -j ACCEPT
+	    elif [ "$TransAccess" = "2" ]; then
+    		iptables -A servicelimit $STATE_NEW -p tcp --dport $TransRPCPort -j ACCEPT
+	    fi
+	    # Incoming peers
+	    iptables -A servicelimit -p tcp --dport $TransInPort -j ACCEPT
+	fi
+	# Chillispot rules
+	if [ "$chilli_enable" = "on" ]; then
+		$LOG "Chillispot allow reqests to 3990-3991 ports from $chilli_net"
+		iptables -A servicelimit ! -i $wan_if -s $chilli_net $STATE_NEW -p tcp --dport 3990:3991 -j ACCEPT
+	fi
+	if [ "$WANPingFilter" = "0" ] && [ "$ROUTE_MODE" = "on" ]; then
+    	    $LOG "icmp drop ping from wan $wan_if"
+    	    iptables -A servicelimit -i $wan_if -p icmp --icmp-type echo-request -j DROP
+	    if [ "$VPN_CONNECT" = "on" ] && [ "$real_wan_if" != "" ]; then
+    	        iptables -A servicelimit -i $real_wan_if -p icmp --icmp-type echo-request -j DROP
+	    fi
+	    if [ "$MODEMENABLED" = "1" ]; then
+    	        iptables -A servicelimit -i $mdm_if -p icmp --icmp-type echo-request -j DROP
+	    fi
+	else
+	    $LOG "Allow rate limited ping from all interfaces."
+	fi
+	if [ "$iperfEnabled" = "1" ]; then
+	    $LOG "iperf allow to connect"
+	    iptables -A servicelimit -i $lan_if -p tcp --dport 5201 -j ACCEPT
+	fi
+	# allow ratelimit ping request
+	iptables -A servicelimit -p icmp --icmp-type echo-request -m limit --limit 25/s -j ACCEPT
+	iptables -A servicelimit -p icmp --icmp-type echo-request -j DROP
+	# allow all others icmp messages (mtu probing and others)
+        iptables -A servicelimit  -p icmp ! --icmp-type echo-request -j ACCEPT
+}
+
+forwardlimit() {
+	$LOG "Set forward rules"
+	if [ "$igmpEnabled" != "0" ]; then
+	    $LOG "Set igmp forward rules"
+	    iptables -A FORWARD -d $mcast_net -o $lan_if -j ACCEPT
+	    iptables -A FORWARD -s $mcast_net -i $lan_if -j ACCEPT
+	    if [ "$tv_port" = "1" ] && [ "$tv_portVLAN" != "" ] && [ "$tv_port_mcast" = "1" ]; then
+		    iptables -A FORWARD -d $mcast_net -o $vlantvif -j ACCEPT
+		    iptables -A FORWARD -s $mcast_net -i $vlantvif -j ACCEPT
+	    fi
+	    if [ "$sip_port" = "1" ] && [ "$sip_portVLAN" != "" ] && [ "$sip_port_mcast" = "1" ]; then
+		    iptables -A FORWARD -d $mcast_net -o $vlansipif -j ACCEPT
+		    iptables -A FORWARD -s $mcast_net -i $vlansipif -j ACCEPT
+	    fi
+	fi
+	if [ "$ForwardSesLimit" != "" ] && [ "$ForwardSesLimit" != "0" ]; then
+	    $LOG "Limit per user tcp sessions to $ForwardSesLimit"
+	    iptables -A FORWARD -o $wan_if -p tcp --tcp-flags SYN SYN $CONNLIMIT $ForwardSesLimit --connlimit-mask 32 -j DROP
+	    if [ "$VPN_CONNECT" = "on" ] && [ "$real_wan_if" != "" ]; then
+		iptables -A FORWARD -o $real_wan_if -p tcp --tcp-flags SYN SYN $CONNLIMIT $ForwardSesLimit --connlimit-mask 32 -j DROP
+	    fi
+	    if [ "$MODEMENABLED" = "1" ]; then
+		iptables -A FORWARD -o $mdm_if -p tcp --tcp-flags SYN SYN $CONNLIMIT $ForwardSesLimit --connlimit-mask 32 -j DROP
+	    fi
+	fi
+	if [ "$IPPortFilterEnable" = "1" ] && [ -e /etc/macipfilter ]; then
+	    $LOG "Set macipport filter rules"
+	    /etc/macipfilter
+	fi
+	if [ -e /etc/websfilter ]; then
+    	    $LOG "Add filter rules for web content filters"
+    	    /etc/websfilter
+	fi
+	# add forward chain for vpn server
+	if [ "$l2tp_srv_enabled" = "1" ]; then
+    	    $LOG "Add forward chain for vpnserver"
+	    iptables -N l2tpsrvfwd
+	    iptables -A FORWARD -j l2tpsrvfwd
+	fi
+	# enable forward for chillispot networks (really access manage direct from chillispot daemon over tun)
+	if [ "$chilli_enable" = "on" ]; then
+    	    $LOG "Add forward rules for chillispot"
+	    if [ -d /sys/module/xt_coova ]; then
+		iptables -A FORWARD ! -o $wan_if -s $chilli_net -p tcp -m coova --name chilli -j ACCEPT
+		iptables -A FORWARD ! -i $wan_if -d $chilli_net -p tcp -m coova --name chilli --dest -j ACCEPT
+		iptables -A FORWARD ! -o $wan_if -s $chilli_net -p udp -m coova --name chilli -j ACCEPT
+		iptables -A FORWARD ! -i $wan_if -d $chilli_net -p udp -m coova --name chilli --dest -j ACCEPT
+		if [ "$VPN_CONNECT" = "on" ] && [ "$real_wan_if" != "" ]; then
+		    iptables -A FORWARD ! -o $real_wan_if -s $chilli_net -p tcp -m coova --name chilli -j ACCEPT
+		    iptables -A FORWARD ! -i $real_wan_if -d $chilli_net -p tcp -m coova --name chilli --dest -j ACCEPT
+		    iptables -A FORWARD ! -o $real_wan_if -s $chilli_net -p udp -m coova --name chilli -j ACCEPT
+		    iptables -A FORWARD ! -i $real_wan_if -d $chilli_net -p udp -m coova --name chilli --dest -j ACCEPT
+		fi
+		if [ "$MODEMENABLED" = "1" ]; then
+		    iptables -A FORWARD ! -o $mdm_if -s $chilli_net -p tcp -m coova --name chilli -j ACCEPT
+		    iptables -A FORWARD ! -i $mdm_if -d $chilli_net -p tcp -m coova --name chilli --dest -j ACCEPT
+		    iptables -A FORWARD ! -o $mdm_if -s $chilli_net -p udp -m coova --name chilli -j ACCEPT
+		    iptables -A FORWARD ! -i $mdm_if -d $chilli_net -p udp -m coova --name chilli --dest -j ACCEPT
+		fi
+	    fi
+	    iptables -A FORWARD -o $wan_if -s $chilli_net -j ACCEPT
+	    if [ "$VPN_CONNECT" = "on" ] && [ "$real_wan_if" != "" ]; then
+		iptables -A FORWARD -o $real_wan_if -s $chilli_net -j ACCEPT
+	    fi
+	    if [ "$MODEMENABLED" = "1" ]; then
+		iptables -A FORWARD -o $mdm_if -s $chilli_net -j ACCEPT
+	    fi
+	fi
+	# enable forward only from local network to any in normal mode
+	# in proxy arp mode need all forward packets to accepted
+	if [ "$parproutedEnabled" != "1" ]; then
+    	    $LOG "Allow forward from LAN to any"
+	    iptables -A FORWARD -i $lan_if -s $lan_ipaddr/$lan_netmask -j ACCEPT
+	else
+    	    $LOG "Parprouted enabled - allow forward any to any"
+	    iptables -I FORWARD -j ACCEPT
+	fi
+}
+
+simpleqos() {
+	if [ "$QoSEnable" != "0" ] && [ -e /etc/qos_firewall ]; then
+	    $LOG "Add QoS rules"
+	    /etc/qos_firewall
+	fi
+}
+
+natrules() {
+	####################PORTFORWARD#############################
+	# allow forward packets for portfw rules only if nat enabled
+	# and portforward rules really generated
+	if [ "$PortForwardEnable" = "1" ]; then
+	    if [ -e /etc/portforward ] && [ "$wan_ipaddr" != "" ]; then
+		$LOG "Add portforward NAT rules over $wan_ipaddr"
+		/etc/portforward "$wan_ipaddr"
+	    fi
+	    # allways add allow forward rules at portforward enabled
+	    if [ -e /etc/portforward_access ]; then
+		$LOG "Add portforward FORWARD rules"
+		/etc/portforward_access
+	    fi
+	fi
+	#######################REDIR################################
+	if [ "$dnsPEnabled" = "1" ] && [ "$dnsToLocalRedir" = "1" ]; then
+	    $LOG "Redirect all DNS requests to local DNS proxy."
+	    iptables -I PREROUTING -t nat -p udp --dport 53 -s $lan_ipaddr/$lan_netmask -j DNAT --to $lan_ipaddr:53
+	fi
+	#######################NAT##################################
+	if [ "$natEnabled" = "1" ]; then
+	    # default use SNAT istead of masqrade, more fast
+	    # masqrade use only if IP adreess not exist on if
+	    if [ "$wan_ipaddr" != "" ]; then
+		if [ "$chilli_enable" != "on" ]; then
+		    $LOG "Add SNAT from $lan_ipaddr/$lan_netmask to $wan_ipaddr at $wan_if."
+		    iptables -t nat -A POSTROUTING -o $wan_if -s $lan_ipaddr/$lan_netmask -j SNAT --to-source $wan_ipaddr
+		else
+		    $LOG "Add SNAT from $chilli_net to $wan_ipaddr at $wan_if."
+		    iptables -t nat -A POSTROUTING -o $wan_if -s $chilli_net -j SNAT --to-source $wan_ipaddr
+		fi
+	    else
+		if [ "$chilli_enable" != "on" ]; then
+		    $LOG "Add MASQRADE from $lan_ipaddr/$lan_netmask to $wan_if."
+		    iptables -t nat -A POSTROUTING -o $wan_if -s $lan_ipaddr/$lan_netmask -j MASQUERADE
+		else
+		    $LOG "Add MASQRADE from $chilli_net to $wan_if."
+		    iptables -t nat -A POSTROUTING -o $wan_if -s $chilli_net -j MASQUERADE
+		fi
+	    fi
+	    # for 3G/4G allways use masqrade for avoid rebuild rules every connect
+	    if [ "$MODEMENABLED" = "1" ]; then
+		if [ "$chilli_enable" != "on" ]; then
+		    $LOG "Add MASQRADE from $lan_ipaddr/$lan_netmask to $mdm_if."
+		    iptables -t nat -A POSTROUTING -o $mdm_if -s $lan_ipaddr/$lan_netmask -j MASQUERADE
+		else
+		    $LOG "Add MASQRADE from $chilli_net to $mdm_if."
+		    iptables -t nat -A POSTROUTING -o $mdm_if -s $chilli_net -j MASQUERADE
+		fi
+	    fi
+	fi
+}
+
+vpnrules() {
+	$LOG "Call to add VPN netfilter rules."
+	PPPIFLIST=`ip -4 addr list | awk '/[0-9].*\: ppp.*/ { sub (":","",$2); print $2; }'`
+	for pppnum in $PPPIFLIST; do
+	    if [ -e /tmp/ppp_firewall_$pppnum ]; then
+		eval "/tmp/ppp_firewall_$pppnum"
+	    fi
+	done
+}
+
+upnprules() {
+	if [ "$upnpEnabled" = "1" ]; then
+	    $LOG "Add base upnp rules"
+	    # nat rules
+	    iptables -t nat -N MINIUPNPD
+	    iptables -t nat -F MINIUPNPD
+	    iptables -t nat -N MINIUPNPD-POSTROUTING
+	    iptables -t nat -F MINIUPNPD-POSTROUTING
+	    # packets join to UPNP (multicast no need join to upnp chain)
+	    iptables -t nat -A PREROUTING -i $wan_if ! -s $mcast_net -j MINIUPNPD
+	    iptables -t nat -A POSTROUTING -o $wan_if ! -d $mcast_net -j MINIUPNPD-POSTROUTING
+	    # all packets from VPN join to UPNP
+	    if [ "$vpnNAT" != "off" ] && [ "$real_wan_if" != "" ]; then
+		iptables -t nat -A PREROUTING -i $real_wan_if -j MINIUPNPD
+		iptables -t nat -A POSTROUTING -o $real_wan_if -j MINIUPNPD-POSTROUTING
+	    fi
+	    # filter rules
+	    iptables -t filter -N MINIUPNPD
+	    iptables -t filter -F MINIUPNPD
+	    iptables -t filter -I FORWARD -j MINIUPNPD
+	fi
+}
+
+dmzrules() {
+	if [ "$DMZEnable" = "1" ] && [ "$DMZIPAddress" != "" ]; then
+    	    $LOG "DMZ enabled for $DMZIPAddress"
+    	    iptables -t nat -N DMZ
+    	    iptables -t nat -F DMZ
+	    if [ "$igmpEnabled" != "0" ] || [ "$UDPXYMode" != "0" ]; then
+		# multicast no need forward to dmz chain if igmpproxy/udpxy enables
+		iptables -t nat -A DMZ -i $wan_if -p igmp -j RETURN
+		iptables -t nat -A DMZ -i $wan_if -p udp -d $mcast_net -j RETURN
+    		iptables -t nat -A PREROUTING ! -s $mcast_net -j DMZ
+	    else
+		# all packets join to DMZ
+    		iptables -t nat -A PREROUTING -j DMZ
+	    fi
+    	    if [ "$VPN_CONNECT" = "on" ] || [ "$l2tp_srv_enabled" = "1" ]; then
+		# filter VPN transport packets
+        	if [ "$vpnType" = "1" ]; then
+		    # pptp
+	    	    iptables -t nat -A DMZ -p tcp --dport 1723 -j RETURN
+	    	    iptables -t nat -A DMZ -p tcp --sport 1723 -j RETURN
+		    iptables -t nat -A DMZ -p gre -j RETURN
+		fi
+		if [ "$vpnType" = "2" ] || [ "$l2tp_srv_enabled" = "1" ]; then
+	    	    # l2tp
+	    	    iptables -t nat -A DMZ -p udp --dport 1701 -j RETURN
+	    	    iptables -t nat -A DMZ -p udp --sport 1701 -j RETURN
+		fi
+	    fi
+	    # nat loopback for DMZ
+	    if [ "$DMZNATLoopback" = "1" ] && [ "$wan_ipaddr" != "" -o "$real_wan_ipaddr" != "" ]; then
+		if [ "$vpnNAT" != "off" ] && [ "$real_wan_if" != "" ] && [ "$real_wan_ipaddr" != "" ]; then
+		    iptables -t nat -A DMZ -i $lan_if -d $real_wan_ipaddr -j DNAT --to-destination $DMZIPAddress
+		    iptables -t nat -A DMZ -i $real_wan_if -d $real_wan_ipaddr -j DNAT --to-destination $DMZIPAddress
+		else
+		    iptables -t nat -A DMZ -i $lan_if -d $wan_ipaddr -j DNAT --to-destination $DMZIPAddress
+		    iptables -t nat -A DMZ -i $wan_if -d $wan_ipaddr -j DNAT --to-destination $DMZIPAddress
+		fi
+		iptables -t nat -A POSTROUTING -s $lan_ipaddr/$lan_netmask -d $DMZIPAddress -j SNAT --to-source $lan_ipaddr
+	    fi
+
+	    # direct DMZ from all ifaces
+	    iptables -t nat -A DMZ ! -i $lan_if ! -s $lan_ipaddr/$lan_netmask -j DNAT --to $DMZIPAddress
+
+	    # allow forward to dmz host
+	    iptables -A FORWARD ! -i $lan_if -d $DMZIPAddress -j ACCEPT
+	fi
+}
+
+clampmss() {
+	if [ "$mss_use_pmtu" = "1" ]; then
+	    # automatic correct mss based from pmtu discovery
+	    iptables -t mangle -A FORWARD -p tcp ! -o $lan_if --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+	else
+	    # use current iface mtu for mss calculate (MSS=MTU-40 bytes)
+	    # for phys wan if dev exist
+	    if [ -d /proc/sys/net/ipv4/conf/$wan_if ]; then
+		cur_mtu=`ip -o link show $wan_if | grep mtu | awk {' print $5 '}`
+		if [ "$cur_mtu" != "" ]; then
+		    let "hole_mtu=$cur_mtu-40"
+		else
+		    hole_mtu="1460"
+		fi
+		iptables -t mangle -A FORWARD -p tcp -o $wan_if --tcp-flags SYN,RST SYN -m tcpmss --mss $hole_mtu:65535 -j TCPMSS --set-mss $hole_mtu
+	    fi
+	    # for vpn if dev exists
+	    if [ -d /proc/sys/net/ipv4/conf/$real_wan_if ] && [ "$real_wan_if" != "$wan_if" ]; then
+		cur_mtu=`ip -o -4 link show dev "$real_wan_if" | awk {' print $5 '}`
+		if [ "$cur_mtu" != "" ]; then
+		    let "hole_mtu=$cur_mtu-40"
+		else
+		    hole_mtu="1460"
+		fi
+		iptables -t mangle -A FORWARD -p tcp -o $real_wan_if --tcp-flags SYN,RST SYN -m tcpmss --mss $hole_mtu:65535 -j TCPMSS --set-mss $hole_mtu
+	    fi
+	fi
+}
+
+tunettl() {
+	# hack for stupid and greedy ISP
+	if [ "$store_ttl" = "1" ]; then
+	    $LOG "Increase TTL for input packets"
+	    iptables -t mangle -A PREROUTING -i $wan_if -j TTL --ttl-inc 1
+	    if [ "$igmpEnabled" != "0" ] && [ "$store_ttl_mcast" = "1" ]; then
+		$LOG "Increase TTL for input multicast packets"
+		iptables -t mangle -A PREROUTING -i $wan_if -d $mcast_net -p udp -j TTL --ttl-inc 1
+	    fi
+	fi
+}
+
+rwfsrulez() {
+	if [ -d /etc/iptables.d -a -x /bin/run-parts ]; then
+	    $LOG "Run scripts from /etc/iptables.d"
+	    run-parts /etc/iptables.d
+	fi
+}
+
+restart() {
+	stop
+	$LOG "Add netfiler rules"
+	#########################################DEFAULTRULES###################################
+	iptables -A INPUT -i lo -j ACCEPT
+	$LOG "Allow established/related in input"
+	iptables -A INPUT $STATE_EST -j ACCEPT
+	$LOG "Drop invalid state connections"
+	iptables -A INPUT -m state --state INVALID -j DROP
+	#########################################DYNAMICRULES###################################
+	servicelimit
+	if [ "$ROUTE_MODE" = "on" ]; then
+	    iptaccounting
+	    forwardlimit
+	    simpleqos
+	    if [ "$natEnabled" = "1" ] || [ "$vpnNAT" != "off" ]; then
+		natrules
+	    fi
+	    clampmss
+	    tunettl
+	fi
+	if [ "$VPN_CONNECT" = "on" ]; then
+	    vpnrules
+	fi
+	if [ "$ROUTE_MODE" = "on" ]; then
+	    if [ "$natEnabled" = "1" ] || [ "$vpnNAT" != "off" ]; then
+		upnprules
+		dmzrules
+	    fi
+	fi
+	rwfsrulez
+	#########################################ACCEPT_ESTABLISHED################################
+	$LOG "Allow established/related in forward"
+	iptables -A FORWARD $STATE_EST -j ACCEPT
+	############################################ENDRULES#######################################
+}
+
+servicelimitv6() {
+        # temp rules need enchange in future (need add service limit for ipv6 local services)
+        ip6tables -A INPUT -i $lan_if -j ACCEPT
+
+	# allow dhcpv6 servers packets client/server
+	ip6tables -A INPUT -i $lan_if -p udp -m udp --dport 547 -j ACCEPT
+	ip6tables -A INPUT -i $six_wan_if -p udp -m udp --dport 546 -j ACCEPT
+
+	# allow multicast for all
+	ip6tables -A INPUT -d ff00::/8 -j ACCEPT
+
+	# dnsproxy
+	if [ "$dnsPEnabled" = "1" ]; then
+	    $LOG "V6: Dnsproxy allow to connect"
+	    ip6tables -A INPUT -i $lan_if -p udp --dport 53 -j ACCEPT
+	    ip6tables -A INPUT -i $lan_if $STATE_NEW -p tcp --dport 53 -j ACCEPT
+	fi
+
+	if [ "$LOCAL_PRT" != "" ]; then
+	    $LOG "V6: allow local port range $LOCAL_PRT from LAN, need for some local service"
+	    ip6tables -A INPUT -i $lan_if -p udp --dport "$LOCAL_PRT" -j ACCEPT
+	fi
+
+        if [ "$WANPingFilter" = "0" ] && [ "$ROUTE_MODE" = "on" ]; then
+	    $LOG "V6: Filter all ipv6 icmp echo requests to router."
+    	    ip6tables -A INPUT -p ipv6-icmp --icmpv6-type echo-request -j DROP
+	else
+	    $LOG "V6: Allow ratelimited icmp echo requests to router."
+	    ip6tables -A INPUT -p ipv6-icmp --icmpv6-type echo-request -m limit --limit 25/s -j ACCEPT
+	    ip6tables -A INPUT -p ipv6-icmp --icmpv6-type echo-request -j DROP
+	fi
+
+	# allow all others icmp messages (mtu probing and others) to router and clients
+	ip6tables -A INPUT -p ipv6-icmp ! --icmpv6-type echo-request -j ACCEPT
+}
+
+forwardlimitv6() {
+        # wan accept and mss fix rules
+        ip6tables -A FORWARD -t mangle -p tcp ! -o $lan_if --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+
+	if [ "$ForwardSesLimit" != "" ] && [ "$ForwardSesLimit" != "0" ]; then
+	    $LOG "Limit per user tcp sessions to $ForwardSesLimit"
+	    ip6tables -A FORWARD -o $wan_if -p tcp --tcp-flags SYN SYN $CONNLIMIT $ForwardSesLimit --connlimit-mask 32 -j DROP
+	    if [ "$VPN_CONNECT" = "on" ] && [ "$real_wan_if" != "" ]; then
+		ip6tables -A FORWARD -o $real_wan_if -p tcp --tcp-flags SYN SYN $CONNLIMIT $ForwardSesLimit --connlimit-mask 32 -j DROP
+	    fi
+	fi
+
+	# allow forward from lan to internet
+        ip6tables -A FORWARD -i $lan_if -j ACCEPT
+
+	# allow access to LAN from internet over IPv6
+	if [ "$IPv6AllowForward" = "1" ]; then
+    	    ip6tables -A FORWARD -o $lan_if -j ACCEPT
+	fi
+
+        if [ "$WANPingFilter" = "0" ]; then
+	    $LOG "V6: Filter all ipv6 icmp echo requests to router clients."
+    	    ip6tables -A FORWARD -p ipv6-icmp --icmpv6-type echo-request -j DROP
+	else
+	    $LOG "V6: Allow ratelimited icmp echo requests to clients."
+	    ip6tables -A FORWARD -p ipv6-icmp --icmpv6-type echo-request -m limit --limit 25/s -j ACCEPT
+	    ip6tables -A FORWARD -p ipv6-icmp --icmpv6-type echo-request -j DROP
+	fi
+
+	# allow all others icmp messages (mtu probing and others) to router and clients
+	ip6tables -A FORWARD -p ipv6-icmp ! --icmpv6-type echo-request -j ACCEPT
+
+	# pinhole script generated by webui
+	if [ -e /etc/ipv6pinhole ]; then
+	    /etc/ipv6pinhole $lan_if
+	fi
+
+}
+
+upnprulesv6() {
+	# miniupnpd use for ipv6 pinhole support
+	if [ "$upnpEnabled" = "1" ]; then
+	    $LOG "V6: Add base upnp rules"
+	    ip6tables -t filter -N MINIUPNPD
+	    ip6tables -t filter -A FORWARD -i $six_wan_if ! -o $six_wan_if -j MINIUPNPD
+	    $LOG "V6: UPNP allow to connect"
+	    ip6tables -A INPUT -i $lan_if $STATE_NEW -p tcp --dport 8666 -j ACCEPT
+	    ip6tables -A INPUT -i $lan_if -p udp --dport 1900 -j ACCEPT
+	    ip6tables -A INPUT -i $lan_if -p udp --dport 5350:5351 -j ACCEPT
+	fi
+}
+
+rwfsrulezv6() {
+	if [ -d /etc/ip6tables.d -a -x /bin/run-parts ]; then
+	    $LOG "Run scripts from /etc/ip6tables.d"
+	    run-parts /etc/ip6tables.d
+	fi
+}
+
+restartv6() {
+	if [ -d /proc/sys/net/ipv6 ] && [ "$IPv6OpMode" != "0" ]; then
+	    stopv6
+	    #########################################DEFAULTRULES###################################
+	    $LOG "V6: Add netfiler rules"
+	    ip6tables -A INPUT -i lo -j ACCEPT
+	    $LOG "V6: Allow established/related in input"
+	    ip6tables -A INPUT $STATE_EST -j ACCEPT
+	    #########################################DYNAMICRULES###################################
+	    servicelimitv6
+	    if [ "$ROUTE_MODE" = "on" ]; then
+		forwardlimitv6
+		upnprulesv6
+	    fi
+	    rwfsrulezv6
+	    #########################################ACCEPT_ESTABLISHED################################
+	    $LOG "Allow established/related in forward"
+	    ip6tables -A FORWARD $STATE_EST -j ACCEPT
+	    ############################################ENDRULES#######################################
+	fi
+}
+
+iptmodulesload() {
+	# this auto load needed iptables modules (do not remove this modules on the fly)
+	if [ -e /bin/chilli ] && [ "$chilli_enable" = "on" ] && [ ! -d /sys/module/xt_coova ]; then
+	    $LOG "Load xt_coova module for coova chilli daemon"
+	    modprobe -q xt_coova
+	fi
+}
+
+get_param() {
+    # get network, vpn, netfiletrs and others config variables
+    eval `nvram_buf_get 2860 natEnabled DMZEnable DMZIPAddress DMZNATLoopback PortForwardEnable IPPortFilterEnable IPPortFilterInputEnable WANPingFilter \
+	    RemoteSSH RemoteSSHPort RemoteFTP FtpPort RemoteTelnet RemoteManagement RemoteManagementPort RemoteManagementPortHTTPS \
+	    WsddEnabled RIPEnable dhcpEnabled ipt_account upnpEnabled igmpEnabled xupnpd \
+	    TransmissionEnabled TransRPCPort TransInPort TransAccess snmpd parproutedEnabled PrinterSrvEnabled vpnType vpnNAT \
+	    l2tp_srv_enabled radius_srv_enabled store_ttl store_ttl_mcast mss_use_pmtu IPv6AllowForward \
+	    ForwardSesLimit dnsToLocalRedir QoSEnable iperfEnabled`
+
+    # use for route mode detect
+    if [ "$OperationMode" != "0" ] && [ "$ApCliBridgeOnly" != "1" ]; then
+	ROUTE_MODE="on"
+    else
+	ROUTE_MODE="off"
+    fi
+    # if ppp enabled and not lanauth mode (type3 is lanauth not real ppp)
+    if [ "$vpnEnabled" = "on" -a "$vpnType" != "3" ]; then
+	VPN_CONNECT="on"
+    else
+	VPN_CONNECT="off"
+    fi
+    # if start one of this services need allow udp packets to local port range
+    if [ "$SmbEnabled" = "1" ] || [ "$xupnpd" = "1" ] || [ "$upnpEnabled" = "1" ]; then
+	LOCAL_PRT=`sysctl -n net.ipv4.ip_local_port_range | awk {' print $1":"$2 '}`
+    else
+	LOCAL_PRT=""
+    fi
+    # in pppoe pure mode no need add MASQ rules to uplink localnet
+    if [ "$purepppoemode" = "1" ]; then
+	natEnabled=0
+    fi
+    # calculate ip ranges for accounting
+    if [ "$ipt_account" = "1" ]; then
+	lan_ip_acc=`ipcalc "$lan_ipaddr" "$lan_netmask" -ns | cut -f 2- -d =`
+	lan_ip_prf=`ipcalc "$lan_ipaddr" "$lan_netmask" -ps | cut -f 2- -d =`
+    fi
+
+    # check for need rules for iaapd
+    FtSupport=`nvram_get 2860 FtSupport | awk '{ gsub(";"," "); print }'`
+    RRMEnable=`nvram_get 2860 RRMEnable | awk '{ gsub(";"," "); print }'`
+    iaappneed=0
+    for iaappneed in $FtSupport $RRMEnable
+    do
+	if [ "$iaappneed" = "1" ]; then
+	    break
+	fi
+    done
+
+    # macros
+    STATE_NEW="-m state --state NEW"
+    STATE_EST="-m state --state ESTABLISHED,RELATED"
+    CONNLIMIT="-m connlimit --connlimit-above"
+}
+
+stop() {
+    iptables -F > /dev/null 2>&1
+    iptables -t nat -F > /dev/null 2>&1
+    iptables -t filter -F > /dev/null 2>&1
+    iptables -t mangle -F > /dev/null 2>&1
+    iptables -X > /dev/null 2>&1
+    iptables -t nat -X > /dev/null 2>&1
+    iptables -t filter -X > /dev/null 2>&1
+    iptables -t mangle -X > /dev/null 2>&1
+
+    iptables -t mangle -F PREROUTING > /dev/null 2>&1
+    iptables -t mangle -F FORWARD > /dev/null 2>&1
+    iptables -t mangle -F INPUT > /dev/null 2>&1
+    iptables -t mangle -F OUTPUT > /dev/null 2>&1
+    iptables -t mangle -F POSTROUTING > /dev/null 2>&1
+
+    iptables -t nat -Z > /dev/null 2>&1
+    iptables -t filter -Z > /dev/null 2>&1
+    iptables -t mangle -Z > /dev/null 2>&1
+    iptables -Z > /dev/null 2>&1
+
+    # default actions
+    iptables -P FORWARD DROP > /dev/null 2>&1
+    iptables -P INPUT   DROP > /dev/null 2>&1
+    iptables -P OUTPUT ACCEPT > /dev/null 2>&1
+}
+
+stopv6() {
+    if [ -d /proc/sys/net/ipv6 ]; then
+        ip6tables -F > /dev/null 2>&1
+        ip6tables -t filter -F > /dev/null 2>&1
+        ip6tables -t mangle -F > /dev/null 2>&1
+        ip6tables -X > /dev/null 2>&1
+        ip6tables -t filter -X > /dev/null 2>&1
+        ip6tables -t mangle -X > /dev/null 2>&1
+
+        ip6tables -t mangle -F PREROUTING > /dev/null 2>&1
+        ip6tables -t mangle -F FORWARD > /dev/null 2>&1
+        ip6tables -t mangle -F INPUT > /dev/null 2>&1
+        ip6tables -t mangle -F OUTPUT > /dev/null 2>&1
+        ip6tables -t mangle -F POSTROUTING > /dev/null 2>&1
+
+        ip6tables -t filter -Z > /dev/null 2>&1
+        ip6tables -t mangle -Z > /dev/null 2>&1
+        ip6tables -Z > /dev/null 2>&1
+
+        # default actions
+        ip6tables -P FORWARD DROP > /dev/null 2>&1
+        ip6tables -P INPUT   DROP > /dev/null 2>&1
+        ip6tables -P OUTPUT ACCEPT > /dev/null 2>&1
+    fi
+}
+
+case "$1" in
+        start)
+            get_param
+            iptmodulesload
+            restart
+            restartv6
+            ;;
+
+        stop)
+            stop
+            stopv6
+            ;;
+
+        restart)
+            get_param
+            iptmodulesload
+            restart
+            restartv6
+            ;;
+        *)
+            echo $"Usage: $0 {start|stop|restart}"
+esac
+
+# remove running flag
+rm -f /tmp/iptables_runing

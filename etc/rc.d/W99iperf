@@ -1,0 +1,53 @@
+#!/bin/sh
+
+# if app not exist
+if [ ! -e /usr/bin/iperf3 ]; then
+    exit 0
+fi
+
+# get params
+. /etc/scripts/global.sh
+
+LOG="logger -t iperf3"
+
+start() {
+    get_param
+    $LOG "Starting iperf3"
+    if [ "$iperfEnabled" = "1" ]; then
+        /usr/bin/iperf3 -s -D
+    fi
+}
+
+get_param() {
+    eval `nvram_buf_get 2860 iperfEnabled`
+}
+
+stop() {
+    pid=`pidof iperf3`
+    if [ "$pid" != "" ]; then
+	$LOG "Stopping iperf3"
+        # terminate iperf3
+        while killall -q iperf3; do
+            usleep 500000
+            killall -q -SIGKILL iperf3
+        done
+    fi
+}
+
+case "$1" in
+        start)
+            start
+            ;;
+
+        stop)
+            stop
+            ;;
+
+        restart)
+            stop
+            start
+            ;;
+
+        *)
+            echo $"Usage: $0 {start|stop|restart}"
+esac

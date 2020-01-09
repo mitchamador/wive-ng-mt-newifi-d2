@@ -1,0 +1,171 @@
+#!/bin/sh
+
+DOS2UNIX=NO
+FULLREBUILD=NO
+VERSIONPKG="8.2.13.RU.`date +%d%m%Y`"
+
+#---Set_env_ROOTDIR_to_current_dir---#
+ROOTDIR=`pwd`
+export ROOTDIR=$ROOTDIR
+export FIRMROOT=$ROOTDIR
+export LINUXDIR=$ROOTDIR/linux
+
+#-------Set_env_LANG------#
+export LANG=en_US
+export LC_ALL=POSIX
+
+#----------MODE------------#
+MODE="$1"
+case "$MODE" in
+	####################################
+	# dual band 7621A + 7603NE + 7612NE
+	####################################
+	"NEWIFI-D2")
+	    DEVNAME="LENOVO-NEWIFI-D2"
+	    ;;
+        ####################################
+	# dual band 7621A + 7603NE + 7610NE
+	####################################
+	"MT7621-MT7603-MT7610-1T1R-16M-USB")
+	    # GE dual band release
+	    DEVNAME="SNR-CPE-ME1-5GHZ-MT"
+	    ;;
+	####################################
+	# dual band 7620A + 7610NE
+	####################################
+	"MT7620-2T2R-MT7610-1T1R-5GHZ-8M")
+	    # black dualband release
+	    DEVNAME="SNR-CPE-MD1-5GHZ-MT"
+	    ;;
+	"MT7620-2T2R-MT7610-1T1R-5GHZ-8M-R1.1")
+	    # white dualband release
+	    DEVNAME="SNR-CPE-MD1.1-5GHZ-MT"
+	    ;;
+	####################################
+	# one band 7620N
+	####################################
+	"MT7620-2T2R-8M")
+	    # white oneband release
+	    DEVNAME="SNR-CPE-W4N-MT"
+	    ;;
+	####################################
+	# DEMO TARGET
+	####################################
+	"DEMO")
+	    # demoui config
+	    DEVNAME="Wi-CAT-ME1-5GHZ-MT"
+	    ;;
+	*)
+	    echo "Not supported (unknown) mode or mode not set."
+	    exit 1
+esac
+
+#-------OLDCMODE---------#
+# current drivers config path
+KCOPATH="$ROOTDIR/configs/kernel"
+
+# use for product id and model name
+export REALNAME="$MODE"
+export PRODUCTID="$DEVNAME"
+export MODEL_NAME="$DEVNAME"
+export KERNEL_VER="$VERSIONPKG"
+
+# prefer use bash if multishell
+if [ -e /bin/bash ]; then
+    SHELL="/bin/bash"
+else
+    SHELL="/bin/sh"
+fi
+
+export SHELL
+
+echo "_________________________________________________________"
+echo "> Building for $PRODUCTID version $KERNEL_VER <"
+echo "_________________________________________________________"
+
+echo ""								>  $ROOTDIR/sdk_version.h
+echo "#define DEVNAME  \"$DEVNAME\""				>> $ROOTDIR/sdk_version.h
+echo "#define REALNAME \"$MODE\""				>> $ROOTDIR/sdk_version.h
+echo "#define VERSIONPKG  \"$VERSIONPKG\""			>> $ROOTDIR/sdk_version.h
+echo "#define VERSIONSTR \"$DEVNAME-$VERSIONPKG\""		>> $ROOTDIR/sdk_version.h
+echo ""								>> $ROOTDIR/sdk_version.h
+echo ""								>  $ROOTDIR/version
+echo "DEVNAME = \"$DEVNAME\""					>> $ROOTDIR/version
+echo "VERSIONPKG = \"$VERSIONPKG\""				>> $ROOTDIR/version
+echo "VERSIONSTR = \"$DEVNAME-$VERSIONPKG\""			>> $ROOTDIR/version
+echo ""								>> $ROOTDIR/version
+
+# generate history file
+./history.sh > $ROOTDIR/user/web/history.html
+
+#for clear all binary
+if [ "$FULLREBUILD" = "YES" ] ; then
+echo -------------------------------FULL-CLEAR-------------------------------
+    ./clear
+fi
+
+rm -rfv $ROOTDIR/romfs/*
+rm -rfv $ROOTDIR/images/*
+
+if [ ! -e $ROOTDIR/linux ]; then
+    ln -sf  $ROOTDIR/linux-3.4.x $ROOTDIR/linux
+fi
+
+echo --------------------------------COPY-CONFIG-----------------------------
+#####################################################PER-DEVICES-CONFIGS################################################################
+if [ "$MODE" = "MT7621-MT7603-MT7610-1T1R-16M-USB" ] || [ "$MODE" = "DEMO" ]; then
+    cp -fv $KCOPATH/config-kernel-MT7621-MT7603-MT7610-1T1R-16M-USB			$ROOTDIR/linux/.config
+    cp -fv $ROOTDIR/configs/all/config-busybox-USB					$ROOTDIR/user/busybox/.config
+    cp -fv $ROOTDIR/configs/all/config-config-USB					$ROOTDIR/config/.config
+    cp -fv $ROOTDIR/configs/all/config-lib						$ROOTDIR/lib/.config
+elif [ "$MODE" = "NEWIFI-D2" ]; then
+    cp -fv $KCOPATH/config-kernel-NEWIFI-D2                                             $ROOTDIR/linux/.config
+    cp -fv $ROOTDIR/configs/all/config-busybox-USB					$ROOTDIR/user/busybox/.config
+    cp -fv $ROOTDIR/configs/all/config-config-USB					$ROOTDIR/config/.config
+    cp -fv $ROOTDIR/configs/all/config-lib						$ROOTDIR/lib/.config
+elif [ "$MODE" = "MT7620-2T2R-MT7610-1T1R-5GHZ-8M" -o "$MODE" = "MT7620-2T2R-MT7610-1T1R-5GHZ-8M-R1.1" ]; then
+    cp -fv $KCOPATH/config-kernel-MT7620-2T2R-MT7610-1T1R-5GHZ-8M			$ROOTDIR/linux/.config
+    cp -fv $ROOTDIR/configs/all/config-busybox						$ROOTDIR/user/busybox/.config
+    cp -fv $ROOTDIR/configs/all/config-config						$ROOTDIR/config/.config
+    cp -fv $ROOTDIR/configs/all/config-lib						$ROOTDIR/lib/.config
+elif [ "$MODE" = "MT7620-2T2R-8M" ]; then
+    cp -fv $KCOPATH/config-kernel-MT7620-2T2R-8M					$ROOTDIR/linux/.config
+    cp -fv $ROOTDIR/configs/all/config-busybox						$ROOTDIR/user/busybox/.config
+    cp -fv $ROOTDIR/configs/all/config-config						$ROOTDIR/config/.config
+    cp -fv $ROOTDIR/configs/all/config-lib						$ROOTDIR/lib/.config
+else
+    echo "Config files not found."
+    exit 1
+fi
+
+#for wantusoid`s like.
+if [ "$DOS2UNIX" = "YES" ] ; then
+echo ---------------------------------DOS2UNIX--------------------------------
+    find -type f -exec dos2unix {} \;
+fi
+
+if [ "$MODE" = "DEMO" ] ; then
+echo -------------------------------MAKE DEMOUI-------------------------------
+    # prepare and update kernel autoconf
+    make -C  $ROOTDIR/linux oldconfig
+    make -C  $ROOTDIR/linux prepare
+    cp  $ROOTDIR/linux/include/generated/autoconf.h $ROOTDIR/user/nginx/extra-modules/nginx-http-wive/stub
+    # prepare config headers for tree
+    make -C $ROOTDIR oldconfig
+    make -C $ROOTDIR/user/busybox oldconfig
+    ./make_demo.sh
+    exit 0
+fi
+
+echo ---------------------------------MAKE-ALL--------------------------------
+make || exit 1
+
+echo ---------------------------------VERS-ID---------------------------------
+make -C $ROOTDIR/tools/versiongen
+$ROOTDIR/tools/versiongen/versiongen "images/$DEVNAME-$MODE.$VERSIONPKG.bin" > "images/version.txt"
+echo -----------------------------------PACK----------------------------------
+mv -f images/*.bin "images/$DEVNAME-$MODE.$VERSIONPKG.bin"
+links -dump History > "images/CHANGELOG.$VERSIONPKG.txt"
+cp -fv docs/UserManuals/WiveUserManual.pdf	 images/
+zip -r images/$DEVNAME-$MODE.$VERSIONPKG.bin.zip images/*.bin images/*.txt images/*.pdf
+echo ---------------------------------END BUILD-------------------------------
