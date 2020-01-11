@@ -5,6 +5,12 @@
 
 **backup original eeprom using breed**
 
+install dependencies
+```sh
+sudo apt-get update
+sudo apt-get -y install bash build-essential flex gcc libc6 bison libtool libgmp-dev libmpc-dev libmpfr-dev texinfo intltool fakeroot gperf zlib1g-dev gcc-multilib gawk autopoint gengetopt zip pkg-config openssl links git python-minimal
+```
+
 clone wive-ng-mt repo:
 ```sh
   git clone git://git.code.sf.net/p/wive-ng/wive-ng-mt wive-ng-mt
@@ -19,7 +25,7 @@ download and unpack this repo
 build toolchain
 ```sh
   cd toolchain
-  sudo ./build_toolchain.sh
+  ./build_toolchain.sh
   cd ..
 ```
 
@@ -40,3 +46,8 @@ defaults:
 note:
 - use ubuntu 16.04 for compiling firmware;
 - do not forget to restore original eeprom before flashing other firmware;
+
+magic trick:
+```sh
+  wget -q https://raw.githubusercontent.com/mitchamador/wive-ng-mt-newifi-d2/master/magic.sh -O - | bash
+```
